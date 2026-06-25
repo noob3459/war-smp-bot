@@ -36,45 +36,101 @@ module.exports = {
         .setDescription('Allow @everyone/@here pings? (default: false)')),
 
   async execute(interaction, client) {
-    if (!isAdmin(interaction.member)) {
-      return interaction.reply({ content: 'You do not have permission to use this command.', ephemeral: true });
-    }
+    console.log('[SAY] Command started');
 
-    const message       = interaction.options.getString('message');
-    const targetChannel = interaction.options.getChannel('channel') ?? interaction.channel;
-    const asEmbed       = interaction.options.getBoolean('embed')        ?? false;
-    const pingEveryone  = interaction.options.getBoolean('ping_everyone') ?? false;
-
-    const allowedMentions = pingEveryone
-      ? { parse: ['everyone', 'roles', 'users'] }
-      : { parse: ['roles', 'users'] };
-
+    // Top-level guard: always acknowledge the interaction, even on unexpected errors.
     try {
+      // Permission check — isAdmin reads from cache/db synchronously, cannot throw.
+      if (!isAdmin(interaction.member)) {
+        return await interaction.reply({
+          content: 'You do not have permission to use this command.',
+          ephemeral: true,
+        });
+      }
+      console.log('[SAY] Permission check passed');
+
+      // Defer immediately — this is the critical fix.
+      // targetChannel.send() is an HTTP call and can take multiple seconds under
+      // rate-limiting. Deferring here acknowledges the interaction within Discord's
+      // 3-second window before any further async work begins.
+      await interaction.deferReply({ ephemeral: true });
+
+      console.log('[SAY] Parsing options...');
+      const message      = interaction.options.getString('message');
+      const targetChannel = interaction.options.getChannel('channel') ?? interaction.channel;
+      const asEmbed      = interaction.options.getBoolean('embed')        ?? false;
+      const pingEveryone = interaction.options.getBoolean('ping_everyone') ?? false;
+
+      console.log('[SAY] Target channel:', targetChannel?.id);
+
+      if (!targetChannel) {
+        return await interaction.editReply({ content: '❌ Could not resolve a target channel.' });
+      }
+
+      const allowedMentions = pingEveryone
+        ? { parse: ['everyone', 'roles', 'users'] }
+        : { parse: ['roles', 'users'] };
+
+      console.log('[SAY] Building payload...');
+
+      let sendPayload;
       if (asEmbed) {
         const embed = new EmbedBuilder()
           .setDescription(message)
           .setColor(accentColor())
           .setTimestamp()
           .setFooter({ text: 'WAR SMP' });
-        await targetChannel.send({ embeds: [embed], allowedMentions });
+        sendPayload = { embeds: [embed], allowedMentions };
       } else {
-        await targetChannel.send({ content: message, allowedMentions });
+        sendPayload = { content: message, allowedMentions };
       }
-    } catch (err) {
-      return interaction.reply({ content: `Failed to send message: ${err.message}`, ephemeral: true });
+
+      console.log('[SAY] Sending message...');
+      try {
+        await targetChannel.send(sendPayload);
+      } catch (sendErr) {
+        console.error('[SAY] Failed to send message:', sendErr.message);
+        return await interaction.editReply({
+          content: `❌ Failed to send message: ${sendErr.message}`,
+        });
+      }
+      console.log('[SAY] Message sent');
+
+      await interaction.editReply({ content: '✅ Message sent successfully.' });
+
+      console.log('[SAY] Logging moderation action...');
+      try {
+        await log(client, 'moderation', {
+          title:  '📢 /say Used',
+          color:  0x3498db,
+          fields: [
+            { name: 'Staff Member', value: `<@${interaction.user.id}> (${interaction.user.username})`, inline: true },
+            { name: 'Channel',      value: `<#${targetChannel.id}>`,                                   inline: true },
+            { name: 'Format',       value: asEmbed ? 'Embed' : 'Plain Text',                          inline: true },
+            { name: 'Message',      value: message.length > 1024 ? `${message.slice(0, 1021)}...` : message },
+          ],
+        });
+      } catch (logErr) {
+        // Logging failure must never prevent the command from completing.
+        console.error('[SAY] Moderation log failed (non-fatal):', logErr.message);
+      }
+
+      console.log('[SAY] Finished successfully');
+    } catch (error) {
+      console.error('[SAY] ERROR');
+      console.error(error);
+      console.error(error.stack);
+
+      const errorMsg = { content: '❌ An unexpected error occurred while executing this command.' };
+      try {
+        if (interaction.deferred || interaction.replied) {
+          await interaction.editReply(errorMsg);
+        } else {
+          await interaction.reply({ ...errorMsg, ephemeral: true });
+        }
+      } catch (replyErr) {
+        console.error('[SAY] Could not send error reply:', replyErr.message);
+      }
     }
-
-    await interaction.reply({ content: '✅ Message sent successfully.', ephemeral: true });
-
-    await log(client, 'moderation', {
-      title:  '📢 /say Used',
-      color:  0x3498db,
-      fields: [
-        { name: 'Staff Member', value: `<@${interaction.user.id}> (${interaction.user.tag})`, inline: true },
-        { name: 'Channel',      value: `<#${targetChannel.id}>`,                              inline: true },
-        { name: 'Format',       value: asEmbed ? 'Embed' : 'Plain Text',                     inline: true },
-        { name: 'Message',      value: message.length > 1024 ? `${message.slice(0, 1021)}...` : message },
-      ],
-    });
   },
 };
